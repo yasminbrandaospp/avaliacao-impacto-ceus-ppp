@@ -1,0 +1,296 @@
+library(MatchIt)
+library(cobalt)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(readxl)
+library(leaflet)
+library(readr)
+library(stringr)
+library(janitor)
+library(RVAideMemoire)
+library(car)
+library(rstatix)
+library(openxlsx)
+library(writexl)
+
+# Garantir que a pasta OUTPUTS exista
+dir.create("OUTPUTS", showWarnings = FALSE)
+
+####### LEITURA DOS ARQUIVOS ####### 
+
+# Basico
+basico <- read_delim("DADOS/infos_2010/Basico_SP1.csv", 
+                     delim = ";", escape_double = FALSE, col_types = cols(Cod_setor = col_character(), 
+                                                                          V001 = col_number(), V002 = col_number(),
+                                                                          V009 = col_number()), 
+                     locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                     trim_ws = TRUE) %>% 
+  select(Cod_setor, V001, V002, V009) %>% 
+  rename("n_dom" = "V001",
+         "n_pess" = "V002",
+         "med_rend_dom" = "V009") %>% 
+  arrange(Cod_setor)
+
+# ResponsavelRenda
+responsavel_renda <- read_delim("DADOS/infos_2010/ResponsavelRenda_SP1.csv", 
+                                delim = ";", escape_double = FALSE, col_types = cols(Cod_setor = col_character(), 
+                                                                                     V001 = col_number(), V002 = col_number(),
+                                                                                     V003 = col_number(), V004 = col_number(),
+                                                                                     V010 = col_number(), V020 = col_number()), 
+                                locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                                trim_ws = TRUE) %>% 
+  select(Cod_setor, V001, V002, V003, V004, V010, V020) %>%
+  mutate(pct_resp_rend_3_sm_menos = (V001 + V002 + V003 + V004 + V010) / V020) %>% 
+  select(Cod_setor, pct_resp_rend_3_sm_menos)
+
+df <- left_join(basico, responsavel_renda, by = "Cod_setor")
+
+# Responsavel01
+responsavel01 <- read_delim("DADOS/infos_2010/Responsavel01_SP1.csv", 
+                            delim = ";", escape_double = FALSE, col_types = cols(Cod_setor = col_character(), 
+                                                                                 V001 = col_number()), 
+                            locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                            trim_ws = TRUE) %>% 
+  select(Cod_setor, V001)
+
+# Responsavel02
+responsavel02 <- read_delim("DADOS/infos_2010/Responsavel02_SP1.csv", 
+                            delim = ";", escape_double = FALSE, col_types = cols(Cod_setor = col_character(), 
+                                                                                 V001 = col_number(), V093 = col_number()), 
+                            locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                            trim_ws = TRUE) %>% 
+  select(Cod_setor, V001, V093) %>% 
+  left_join(responsavel01, by = "Cod_setor") %>% 
+  mutate(pct_resp_fem = V001.y / V001.x,
+         pct_resp_alfa = V093 / V001.x) %>% 
+  select(Cod_setor, pct_resp_fem, pct_resp_alfa)
+
+df <- left_join(df, responsavel02, by = "Cod_setor")
+
+# Pessoa03
+pessoa03 <- read_delim("DADOS/infos_2010/Pessoa03_SP1.csv", 
+                       delim = ";", escape_double = FALSE, col_types = cols(Cod_setor = col_character(), V001 = col_number(),
+                                                                            V003 = col_number(), V004 = col_number(),
+                                                                            V005 = col_number(), V006 = col_number()), 
+                       locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                       trim_ws = TRUE) %>% 
+  select(Cod_setor, V001, V003, V004, V005, V006) %>% 
+  mutate(pct_pess_ppia = (V003 + V004 + V005 + V006) / V001) %>% 
+  select(Cod_setor, pct_pess_ppia)
+
+df <- left_join(df, pessoa03, by = "Cod_setor")
+
+# Responsavel02 (Idade)
+responsavel02_idade <- read_delim("DADOS/infos_2010/Responsavel02_SP1.csv", col_types = cols(Cod_setor = col_character()),
+                                  delim = ";", escape_double = FALSE, locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                                  trim_ws = TRUE) %>% 
+  select(c(1, 3:94)) %>%
+  mutate_at(2:93, as.numeric)
+
+j <- 3
+for (i in 10:100) {
+  responsavel02_idade[, j] <- responsavel02_idade[, j] * i
+  j <- j + 1
+}
+
+responsavel02_idade$med_resp_idade <- rowSums(responsavel02_idade[, 3:93]) / responsavel02_idade$V001
+df <- left_join(df, select(responsavel02_idade, Cod_setor, med_resp_idade), by = "Cod_setor")
+
+# Domicilio01
+domicilio01 <- read_delim("DADOS/infos_2010/Domicilio01_SP1.csv", 
+                          delim = ";", escape_double = FALSE, col_types = cols(Cod_setor = col_character(),
+                                                                               V002 = col_number(), V024 = col_number()), 
+                          locale = locale(decimal_mark = ",", grouping_mark = "."), 
+                          trim_ws = TRUE) %>% 
+  select(Cod_setor, V002, V024) %>% 
+  mutate(pct_dom_san = (V024) / V002) %>% 
+  select(Cod_setor, pct_dom_san)
+
+df <- left_join(df, domicilio01, by = "Cod_setor")
+
+
+####### MATCHING DOS SETORES ####### 
+
+# CEUs reais
+ceus_1o_lote <- data.frame(
+  CEU = c("CIDADE ADEMAR", "CIDADE LIDER", "ERMELINO MATARAZZO", "GRAJAU", "IMPERADOR"),
+  LAT = c(-23.671953969833766, -23.55450294404546, -23.48831440932225, -23.762362435094627, -23.588001220820445),
+  LONG = c(-46.667613661425506, -46.50667942942734, -46.48120861060095, -46.690674388765686, -46.51585052050288)
+) %>%
+  st_as_sf(coords = c("LONG", "LAT"), crs = 4326) %>%
+  st_transform(31983) %>%
+  st_buffer(1500)
+
+set.seed(24844452)
+n_amostra <- 5000
+lat_min <- -23.692778
+lat_max <- -23.47507
+lon_min <- -46.825
+lon_max <- -46.365
+
+pontos_ficticios <- data.frame(
+  CEU = sprintf("%05d", 1:n_amostra),
+  LAT = runif(n_amostra, lat_min, lat_max),
+  LONG = runif(n_amostra, lon_min, lon_max)
+) %>%
+  st_as_sf(coords = c("LONG", "LAT"), crs = 4326) %>%
+  st_transform(31983)
+
+malha_aux <- read_sf("DADOS/malha_2010/35SEE250GC_SIR_sp_utm_corrigida.shp") %>%
+  st_transform(31983)
+
+pontos_ficticios_sp <- pontos_ficticios %>%
+  st_intersection(malha_aux) %>%
+  select(CEU) %>%
+  st_buffer(1500)
+
+aux_ceus <- read_csv("DADOS/infos_ceus/CEUs_georref.csv", 
+                     locale = locale(decimal_mark = ",", grouping_mark = ".")) %>%
+  select(1:3) %>%
+  rename("LAT" = "Latitude", "LONG" = "Longitude")
+
+aux_ceus <- rbind(aux_ceus,
+                  data.frame(CEU = c("CIDADE ADEMAR", "CIDADE LIDER", "ERMELINO MATARAZZO", "GRAJAU", "IMPERADOR"),
+                             LAT = c(-23.671953969833766, -23.55450294404546, -23.48831440932225, -23.75413816348209, -23.588001220820445),
+                             LONG = c(-46.667613661425506, -46.50667942942734, -46.48120861060095, -46.698470595134644, -46.51585052050288))) %>%
+  st_as_sf(coords = c("LONG", "LAT"), crs = 4326) %>%
+  st_transform(31983) %>%
+  st_buffer(1500)
+
+intersecao_ceus <- pontos_ficticios_sp %>% st_intersection(aux_ceus)
+pontos_ficticios_sp <- pontos_ficticios_sp %>% subset(!(CEU %in% intersecao_ceus$CEU))
+
+malha <- read_sf("DADOS/malha_2010/35SEE250GC_SIR_sp_utm_corrigida.shp") %>%
+  st_transform(31983) %>%
+  left_join(df, by = c("CD_GEOCODI" = "Cod_setor"))
+
+ceus_1o_lote$TRAT <- 1
+pontos_ficticios_sp$TRAT <- 0
+
+ceus_1o_lote <- rbind(
+  ceus_1o_lote[, c("CEU", "geometry", "TRAT")],
+  pontos_ficticios_sp[, c("CEU", "geometry", "TRAT")]
+)
+
+intersecao <- malha %>% st_intersection(ceus_1o_lote)
+setores_cortados <- malha %>% 
+  filter(apply(st_intersects(geometry, st_buffer(ceus_1o_lote, 1500), sparse = FALSE), 1, any)) %>% 
+  filter(!apply(st_within(geometry, st_buffer(ceus_1o_lote, 1500), sparse = FALSE), 1, all))
+
+intersecao <- bind_rows(intersecao, setores_cortados)
+
+perfil_ceus <- intersecao %>%
+  group_by(CEU, TRAT) %>%
+  summarise(
+    n_dom = sum(n_dom, na.rm = TRUE),
+    n_pess = sum(n_pess, na.rm = TRUE),
+    med_rend_dom = mean(med_rend_dom, na.rm = TRUE),
+    pct_resp_rend_3_sm_menos = mean(pct_resp_rend_3_sm_menos, na.rm = TRUE),
+    pct_resp_fem = mean(pct_resp_fem, na.rm = TRUE),
+    pct_resp_alfa = mean(pct_resp_alfa, na.rm = TRUE),
+    pct_pess_ppia = mean(pct_pess_ppia, na.rm = TRUE),
+    med_resp_idade = mean(med_resp_idade, na.rm = TRUE),
+    pct_dom_san = mean(pct_dom_san, na.rm = TRUE)
+  ) %>%
+  st_drop_geometry() %>%
+  na.omit()
+
+perfil_ceus <- subset(perfil_ceus, !(CEU %in% c('03096', '03004', '00482', '00611', '03564', '00686', '03432', '01421', '03601', '02447', '04240', 
+                                                '01235', '03108', '01386', '03998', '03332', '00437', '03696', '03806',
+                                                '03771', '00504', '04002', '04322')))
+
+mod_match <- matchit(
+  as.numeric(TRAT) ~ med_rend_dom + pct_resp_rend_3_sm_menos + pct_resp_fem + 
+    pct_resp_alfa + pct_pess_ppia + med_resp_idade + pct_dom_san,
+  method = "nearest",
+  data = perfil_ceus
+)
+
+perfil_ceus_m <- match.data(mod_match)
+
+ceus_1o_lote <- ceus_1o_lote %>%
+  left_join(select(perfil_ceus_m, CEU, subclass), by = "CEU")
+
+####### SORTEIO DOS SETORES ####### 
+
+sorteio <- intersecao %>% 
+  subset(CEU %in% perfil_ceus_m$CEU) %>% 
+  select(CEU, CD_GEOCODI, n_pess) %>% 
+  group_by(CEU) %>% 
+  mutate(n_pess_CEU = sum(n_pess, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(PPT = n_pess / n_pess_CEU) %>% 
+  select(CEU, CD_GEOCODI, PPT) %>% 
+  na.omit()
+
+aux <- data.frame()
+
+for (i in sort(unique(sorteio$CEU))) {
+  set.seed(1234)
+  if (i == "ERMELINO MATARAZZO") {
+    aux_1 <- sample_n(subset(sorteio, CEU == i), 36, weight = sorteio$PPT[sorteio$CEU == i], replace = TRUE)
+    aux_1$setor_escolhido <- "Sim"
+    aux_1$setor_escolhido[13:36] <- "Reserva"
+  } else {
+    aux_1 <- sample_n(subset(sorteio, CEU == i), 24, weight = sorteio$PPT[sorteio$CEU == i], replace = TRUE)
+    aux_1$setor_escolhido <- "Sim"
+    aux_1$setor_escolhido[13:24] <- "Reserva"
+  }
+  aux <- rbind(aux, aux_1)
+}
+
+aux <- st_drop_geometry(aux)
+
+sorteio <- sorteio %>% left_join(select(aux, CEU, CD_GEOCODI, setor_escolhido), by = c("CEU", "CD_GEOCODI"))
+sorteio$setor_escolhido[is.na(sorteio$setor_escolhido)] <- "Não"
+
+descricao <- read_excel("DADOS/infos_2010/Descrição_Municipio_SP_Capital.xls") %>% 
+  clean_names() %>% 
+  select(geocodigo, ponto_inicial, descricao_do_perimetro)
+
+aux <- aux %>% left_join(descricao, by = c("CD_GEOCODI" = "geocodigo"))
+
+st_crs(sorteio) <- 31983
+sorteio <- st_transform(sorteio, crs=4326)
+
+####### INTERSECÇÃO FAVELAS ####### 
+
+malha_favela <- read_sf("DADOS/SIRGAS_SHP_favela/SIRGAS_SHP_favela.shp")
+st_crs(malha_favela) <- 31983
+malha_favela <- st_transform(malha_favela, crs=4326)
+
+setores_escolhidos <- sorteio %>% filter(setor_escolhido == "Sim") %>% distinct()
+setores_reserva <- sorteio %>% filter(setor_escolhido == "Reserva") %>% distinct()
+
+intersecao_favela_setores_escolhidos <- st_intersection(setores_escolhidos, malha_favela)
+interseccao_favela_setores_reserva <- st_intersection(setores_reserva, malha_favela)
+
+setores_escolhidos_sem_favela <- setores_escolhidos %>% 
+  filter(!CD_GEOCODI %in% intersecao_favela_setores_escolhidos$CD_GEOCODI)
+
+setores_reserva_sem_favela <- setores_reserva %>% 
+  filter(!CD_GEOCODI %in% interseccao_favela_setores_reserva$CD_GEOCODI)
+
+setores_sem_favela <- bind_rows(setores_escolhidos_sem_favela, setores_reserva_sem_favela) %>%
+  distinct(CD_GEOCODI, .keep_all = TRUE)
+
+######### DESCRIÇÃO DOS SETORES E OUTPUTS #########
+
+descricao_setores <- read_excel("DADOS/Descrição dos Setores.xls")
+
+resultado <- merge(setores_sem_favela, descricao_setores, by.x = "CD_GEOCODI", by.y = "Geocodigo", all.x = TRUE)
+resultado <- resultado[, c("CD_GEOCODI", "CEU", "setor_escolhido", "ponto inicial", "Descrição do perímetro")]
+resultado <- resultado %>% mutate(geometry = as.character(geometry))
+
+# Salvando outputs na pasta OUTPUTS
+write_xlsx(resultado, "OUTPUTS/resultado.xlsx")
+write_xlsx(aux, "OUTPUTS/setores_1o_lote.xlsx")
+write.csv2(aux, "OUTPUTS/setores_1o_lote.csv", fileEncoding = "UTF-8", row.names = F)
+
+# Salvando RData que será consumido pelo arquivo de cotas
+setores_agrupados <- setores_sem_favela %>%
+  group_by(CEU) %>%
+  summarise(geometry = first(geometry))
+
+save.image(file = "OUTPUTS/workspace.RData")
